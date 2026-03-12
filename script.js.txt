@@ -1,0 +1,758 @@
+// static/js/script.js
+class TelegramDiceApp {
+    constructor() {
+        this.socket = io();
+        this.phoneCodeHash = null;
+        this.isAuthenticated = false;
+        this.currentPhone = null;
+        this.currentGroupId = null;
+        
+        this.initializeElements();
+        this.setupEventListeners();
+        this.setupSocketEvents();
+        // Attempt to restore previous session (if any) before rendering final UI states
+        this.restoreSession();
+        this.updateUIMode(); // Initialize mode UI
+        this.updateDicePreview();
+    }
+    
+    initializeElements() {
+        // Authentication elements
+        this.phoneInput = document.getElementById('phone-input');
+        this.groupIdInput = document.getElementById('group-id-input');
+        this.connectBtn = document.getElementById('connect-btn');
+        this.codeInput = document.getElementById('code');
+        this.verifyCodeBtn = document.getElementById('verify-code-btn');
+        this.authStatus = document.getElementById('auth-status');
+        
+        // Debug: Check if elements are found
+        console.log('Elements found:');
+        console.log('phoneInput:', this.phoneInput);
+        console.log('groupIdInput:', this.groupIdInput);
+        console.log('connectBtn:', this.connectBtn);
+        
+        if (!this.phoneInput) console.error('phone-input element not found!');
+        if (!this.groupIdInput) console.error('group-id-input element not found!');
+        if (!this.connectBtn) console.error('connect-btn element not found!');
+        
+        // Stop monitoring button
+        this.stopMonitoringBtn = document.getElementById('stop-monitoring-btn');
+        
+        // Mode toggle elements
+        this.modeRadios = document.querySelectorAll('input[name="mode"]');
+        this.modeOptions = document.querySelectorAll('.mode-option');
+        this.currentMode = 'X';
+
+        // flick inputs for Z mode
+        this.flickTotalInput = document.getElementById('flick-total');
+        this.flickPerInput = document.getElementById('flick-per');
+
+        // Dice elements
+        this.diceSection = document.getElementById('dice-section');
+        this.diceSelects = [
+            document.getElementById('dice1'),
+            document.getElementById('dice2'),
+            document.getElementById('dice3'),
+            document.getElementById('dice4'),
+            document.getElementById('dice5'),
+            document.getElementById('dice6')
+        ];
+        // Inject a "Random" (R) option into each dice <select> element if not already present
+        this.diceSelects.forEach(select => {
+            if (!select.querySelector('option[value="R"]')) {
+                const opt = document.createElement('option');
+                opt.value = 'R';
+                opt.textContent = '🎲 Random (R)';
+                select.appendChild(opt);
+            }
+        });
+        this.diceDisplay = document.getElementById('dice-display');
+        this.sendDiceBtn = document.getElementById('send-dice-btn');
+        this.randomDiceBtn = document.getElementById('random-dice-btn');
+        this.disconnectBtn = document.getElementById('disconnect-btn');
+        // Button to allow user to change phone number / group ID on demand
+        this.changeCredsBtn = document.getElementById('change-credentials-btn');
+        this.sendStatus = document.getElementById('send-status');
+        
+        // Group elements
+        this.groupDetails = document.getElementById('group-details');
+        this.refreshGroupBtn = document.getElementById('refresh-group-btn');
+        // Inline group ID updater elements
+        this.newGroupIdInput = document.getElementById('new-group-id-input');
+        this.updateGroupBtn = document.getElementById('update-group-btn');
+        
+        // Messages container
+        this.messagesContainer = document.getElementById('messages');
+    }
+    
+    setupEventListeners() {
+        // Authentication events
+        this.connectBtn.addEventListener('click', () => {
+            console.log('Connect button clicked');
+            this.startAuth();
+        });
+        this.verifyCodeBtn.addEventListener('click', () => this.verifyCode());
+        
+        // Dice events
+        // Mode change events
+        this.modeRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                this.currentMode = radio.value;
+                this.updateUIMode();
+                this.updateDicePreview();
+            });
+        });
+
+        // Mode option click events for better UX
+        this.modeOptions.forEach(option => {
+            option.addEventListener('click', (e) => {
+                if (e.target.type !== 'radio') {
+                    const radio = option.querySelector('input[type="radio"]');
+                    radio.checked = true;
+                    radio.dispatchEvent(new Event('change'));
+                }
+            });
+        });
+
+        this.diceSelects.forEach(select => {
+            select.addEventListener('change', () => this.updateDicePreview());
+        });
+        
+        this.sendDiceBtn.addEventListener('click', () => this.sendDice());
+        this.stopMonitoringBtn.addEventListener('click', () => this.stopMonitoring());
+        this.randomDiceBtn.addEventListener('click', () => this.randomizeDice());
+        this.disconnectBtn.addEventListener('click', () => this.disconnect());
+        this.refreshGroupBtn.addEventListener('click', () => this.getGroupInfo());
+        this.changeCredsBtn.addEventListener('click', () => this.changeCredentials());
+        this.updateGroupBtn.addEventListener('click', () => this.updateGroupId());
+        
+        // Enter key support
+        this.codeInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.verifyCode();
+        });
+        
+        this.phoneInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.startAuth();
+        });
+        
+        this.groupIdInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.startAuth();
+        });
+    }
+    
+    setupSocketEvents() {
+        this.socket.on('connect', () => {
+            console.log('Socket connected to server');
+            this.showMessage('Connected to server', 'info');
+            // Query server for existing authentication state
+            this.socket.emit('check_auth_status');
+        });
+        
+        this.socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error);
+            this.showMessage('Failed to connect to server', 'error');
+        });
+
+        // Receive authentication status from server after a reconnect/refresh
+        this.socket.on('auth_status', (data) => {
+            if (data.is_authenticated) {
+                this.isAuthenticated = true;
+                this.currentPhone = data.phone;
+                this.currentGroupId = data.group_id || this.currentGroupId;
+                // Ensure server session has group ID
+                if (this.currentGroupId) {
+                    this.socket.emit('set_group_id', { group_id: this.currentGroupId });
+                }
+                this.showDiceSection();
+                this.updateAuthStatus(`✅ Session active for ${this.currentPhone}`, 'success');
+                // Refresh group info
+                this.getGroupInfo();
+            } else {
+                this.isAuthenticated = false;
+            }
+        });
+        
+        this.socket.on('auth_started', (data) => {
+            this.currentPhone = data.phone;
+            this.updateAuthStatus(data.message, 'info');
+            this.connectBtn.disabled = true;
+            this.connectBtn.textContent = 'Connecting...';
+            this.phoneInput.disabled = true;
+            this.groupIdInput.disabled = true;
+        });
+        
+        this.socket.on('code_sent', (data) => {
+            this.phoneCodeHash = data.phone_code_hash;
+            this.showCodeInput();
+            this.updateAuthStatus(data.message, 'info');
+            this.showMessage('Verification code sent to your Telegram!', 'success');
+        });
+        
+        this.socket.on('auth_success', (data) => {
+            this.isAuthenticated = true;
+            this.showDiceSection();
+            this.updateAuthStatus(`✅ Welcome, ${data.user_name}!`, 'success');
+            this.showMessage(`Successfully authenticated as ${data.user_name}!`, 'success');
+            
+            // Persist credentials locally for session restoration
+            this.saveSession();
+            
+            if (!data.skip_code) {
+                this.hideCodeInput();
+            }
+            
+            // Get group info after successful auth
+            setTimeout(() => this.getGroupInfo(), 1000);
+        });
+        
+        this.socket.on('auth_error', (data) => {
+            this.updateAuthStatus(`❌ ${data.message}`, 'error');
+            this.showMessage(data.message, 'error');
+            this.resetAuthForm();
+        });
+        
+        this.socket.on('send_started', (data) => {
+            this.sendDiceBtn.disabled = true;
+            this.sendDiceBtn.textContent = '🎲 Sending...';
+            this.updateSendStatus('📤 Sending dice to group...', 'info');
+        });
+        
+        this.socket.on('send_success', (data) => {
+            const msgText = data.message_id ? `✅ Dice sent successfully! Message ID: ${data.message_id}` : '✅ Dice sent successfully!';
+            this.updateSendStatus(msgText, 'success');
+            this.showMessage('🎲 Dice sent to group successfully!', 'success');
+            this.resetSendButton();
+        });
+        
+        this.socket.on('send_error', (data) => {
+            this.updateSendStatus(`❌ ${data.message}`, 'error');
+            this.showMessage(data.message, 'error');
+            this.resetSendButton();
+        });
+        
+        this.socket.on('group_info_success', (data) => {
+            this.displayGroupInfo(data);
+        });
+        
+        this.socket.on('group_info_error', (data) => {
+            this.groupDetails.innerHTML = `❌ Error: ${data.message}`;
+        });
+        
+        this.socket.on('disconnect_success', (data) => {
+            this.resetToInitialState();
+            this.showMessage('Disconnected from Telegram', 'info');
+        });
+        
+        // M Mode event listeners
+        this.socket.on('monitoring_started', (data) => {
+            this.showMessage(`👁️ Monitoring started for ${data.group_name || 'group'}`, 'success');
+            this.updateSendStatus(`👁️ Monitoring active - excluding duplicates of: ${data.exclude_numbers.join(', ')}`, 'info');
+            // Show the stop monitoring button
+            this.stopMonitoringBtn.style.display = 'inline-block';
+        });
+        
+        this.socket.on('dice_detected', (data) => {
+            const diceValue = data.value;
+            const isExcluded = data.is_excluded;
+            const isDuplicate = data.is_duplicate;
+            
+            if (isDuplicate && isExcluded) {
+                this.updateSendStatus(`🚫 Detected duplicate excluded number: ${diceValue} - deleting...`, 'warning');
+            } else {
+                this.updateSendStatus(`✅ Detected dice: ${diceValue}${isExcluded ? ' (excluded but first occurrence)' : ''}`, 'info');
+            }
+        });
+        
+        this.socket.on('dice_deleted', (data) => {
+            this.showMessage(`Deleted duplicate dice: ${data.value}`, 'warning');
+        });
+        
+        this.socket.on('dice_replaced', (data) => {
+            this.showMessage(`Replaced dice: ${data.old_value} → ${data.new_value}`, 'info');
+        });
+        
+        this.socket.on('monitoring_status', (data) => {
+            this.updateSendStatus(data.message, 'info');
+            this.showMessage(data.message, 'info');
+        });
+        
+        this.socket.on('monitoring_complete', (data) => {
+            // Only re-enable the button if monitoring is truly complete (not just reached 6 dice)
+            if (!data.still_monitoring) {
+                this.sendDiceBtn.disabled = false;
+                this.sendDiceBtn.textContent = '👁️ Start Monitoring Dice';
+                this.stopMonitoringBtn.style.display = 'none';
+                
+                // Reset the stop button state
+                this.stopMonitoringBtn.disabled = false;
+                this.stopMonitoringBtn.textContent = '⏹️ Stop Monitoring';
+            } else {
+                // Show the stop monitoring button if we're still monitoring
+                this.stopMonitoringBtn.style.display = 'inline-block';
+            }
+            
+            // Show appropriate message based on whether monitoring is still active
+            if (data.still_monitoring) {
+                this.updateSendStatus(`✅ ${data.message || 'Processed 6 dice!'} Results: ${data.results.join(', ')}`, 'success');
+                this.showMessage(`Processed 6 dice. Deleted: ${data.deleted_count} dice. Monitoring still active.`, 'success');
+            } else {
+                this.updateSendStatus(`✅ Monitoring complete! Results: ${data.results.join(', ')}`, 'success');
+                this.showMessage(`Monitoring complete. Deleted: ${data.deleted_count} dice`, 'success');
+            }
+        });
+        
+        this.socket.on('monitoring_error', (data) => {
+            this.sendDiceBtn.disabled = false;
+            this.sendDiceBtn.textContent = '👁️ Start Monitoring Dice';
+            
+            // Reset and hide the stop button
+            this.stopMonitoringBtn.style.display = 'none';
+            this.stopMonitoringBtn.disabled = false;
+            this.stopMonitoringBtn.textContent = '⏹️ Stop Monitoring';
+            
+            this.updateSendStatus(`❌ Monitoring error: ${data.message}`, 'error');
+            this.showMessage(`Error during monitoring: ${data.message}`, 'error');
+        });
+        
+        // Add a stop monitoring button handler if needed
+        this.socket.on('stop_monitoring', () => {
+            this.socket.emit('stop_monitoring');
+        });
+    }
+    
+    startAuth() {
+        console.log('startAuth() called');
+        console.log('phoneInput:', this.phoneInput);
+        console.log('groupIdInput:', this.groupIdInput);
+        
+        if (!this.phoneInput || !this.groupIdInput) {
+            console.error('Input elements not found!');
+            this.showMessage('Error: Input elements not found. Please refresh the page.', 'error');
+            return;
+        }
+        
+        const phone = this.phoneInput.value.trim();
+        const groupId = this.groupIdInput.value.trim();
+        this.currentPhone = phone;
+        this.currentGroupId = groupId;
+        
+        console.log('Phone:', phone);
+        console.log('Group ID:', groupId);
+        
+        if (!phone) {
+            this.showMessage('Please enter a phone number', 'error');
+            this.phoneInput.focus();
+            return;
+        }
+        
+        if (!groupId) {
+            this.showMessage('Please enter a group ID', 'error');
+            this.groupIdInput.focus();
+            return;
+        }
+        
+        // Basic phone number validation
+        if (!phone.startsWith('+') || phone.length < 10) {
+            this.showMessage('Please enter a valid phone number with country code (e.g., +1234567890)', 'error');
+            this.phoneInput.focus();
+            return;
+        }
+        
+        console.log('Emitting start_auth event');
+        this.socket.emit('start_auth', {
+            phone_number: phone,
+            group_id: groupId
+        });
+    }
+    
+    verifyCode() {
+        const code = this.codeInput.value.trim();
+        if (!code || !this.phoneCodeHash) {
+            this.showMessage('Please enter the verification code', 'error');
+            return;
+        }
+        
+        this.verifyCodeBtn.disabled = true;
+        this.verifyCodeBtn.textContent = 'Verifying...';
+        this.updateAuthStatus('🔄 Verifying code...', 'info');
+        
+        this.socket.emit('verify_code', {
+            code,
+            phone_code_hash: this.phoneCodeHash
+        });
+    }
+    
+    sendDice() {
+        if (!this.isAuthenticated) {
+            this.showMessage('Please authenticate first', 'error');
+            return;
+        }
+
+        if (this.currentMode === 'X') {
+            const diceValues = this.diceSelects.map(select => select.value === 'R' ? 'R' : parseInt(select.value));
+            this.socket.emit('send_dice', {
+                mode: 'X',
+                dice_values: diceValues
+            });
+        } else if (this.currentMode === 'Y') {
+            // Gather selected numbers to exclude duplicates for Y mode
+            const checkedBoxes = Array.from(document.querySelectorAll('#exclude-section input[type="checkbox"]:checked'));
+            const excludeNumbers = checkedBoxes.map(cb => parseInt(cb.value));
+
+            if (excludeNumbers.length === 0) {
+                this.showMessage('Please select at least one number to apply no-duplicate rule', 'error');
+                return;
+            }
+            this.socket.emit('send_dice', {
+                mode: 'Y',
+                exclude_numbers: excludeNumbers
+            });
+        } else if (this.currentMode === 'O') {
+            // Optimal mode – same input as Y (exclude list)
+            const checkedBoxes = Array.from(document.querySelectorAll('#exclude-section input[type="checkbox"]:checked'));
+            const excludeNumbers = checkedBoxes.map(cb => parseInt(cb.value));
+
+            if (excludeNumbers.length === 0) {
+                this.showMessage('Please select at least one number to apply no-duplicate rule', 'error');
+                return;
+            }
+            this.socket.emit('send_dice', {
+                mode: 'O',
+                exclude_numbers: excludeNumbers
+            });
+        } else if (this.currentMode === 'Z') {
+            // Z mode – same as Y but with flick limits
+            const checkedBoxes = Array.from(document.querySelectorAll('#exclude-section input[type="checkbox"]:checked'));
+            const excludeNumbers = checkedBoxes.map(cb => parseInt(cb.value));
+
+            if (excludeNumbers.length === 0) {
+                this.showMessage('Please select at least one number to apply no-duplicate rule', 'error');
+                return;
+            }
+
+            const flickTotal = parseInt(this.flickTotalInput.value) || 1;
+            const flickPer = parseInt(this.flickPerInput.value) || 1;
+
+            this.socket.emit('send_dice', {
+                mode: 'Z',
+                exclude_numbers: excludeNumbers,
+                flick_total: flickTotal,
+                flick_per: flickPer
+            });
+        } else if (this.currentMode === 'M') {
+            // M mode - Monitor user-sent dice messages
+            const checkedBoxes = Array.from(document.querySelectorAll('#exclude-section input[type="checkbox"]:checked'));
+            const excludeNumbers = checkedBoxes.map(cb => parseInt(cb.value));
+
+            if (excludeNumbers.length === 0) {
+                this.showMessage('Please select at least one number to monitor for duplicates', 'error');
+                return;
+            }
+            
+            this.socket.emit('start_monitoring', {
+                mode: 'M',
+                exclude_numbers: excludeNumbers
+            });
+            
+            // Update button state
+            this.sendDiceBtn.disabled = true;
+            this.sendDiceBtn.textContent = '👁️ Monitoring Active...';
+            this.updateSendStatus('👁️ Monitoring user dice for duplicates...', 'info');
+        }
+    }
+    
+    randomizeDice() {
+        if (this.currentMode !== 'X') return; // Only for X mode
+        this.diceSelects.forEach(select => {
+            const randomValue = Math.floor(Math.random() * 6) + 1;
+            select.value = randomValue;
+        });
+        this.updateDicePreview();
+        this.showMessage('🎯 Dice randomized!', 'warning');
+    }
+    
+    getGroupInfo() {
+        if (!this.isAuthenticated) {
+            this.groupDetails.innerHTML = '❌ Please authenticate first';
+            return;
+        }
+        
+        this.groupDetails.innerHTML = '🔄 Loading group information...';
+        this.socket.emit('get_group_info');
+    }
+    
+    displayGroupInfo(data) {
+        this.groupDetails.innerHTML = `
+            <strong>📱 Group Name:</strong> ${data.group_name}<br>
+            <strong>🆔 Group ID:</strong> ${data.group_id}<br>
+            <strong>📊 Type:</strong> ${data.group_type}<br>
+            <strong>👥 Members:</strong> ${data.members_count}
+        `;
+    }
+    
+    disconnect() {
+        this.socket.emit('disconnect_telegram');
+    }
+    
+    stopMonitoring() {
+        // Send stop monitoring request to server
+        this.socket.emit('stop_monitoring');
+        this.showMessage('Stopping monitoring...', 'info');
+        
+        // Disable the stop button while request is processing
+        this.stopMonitoringBtn.disabled = true;
+        this.stopMonitoringBtn.textContent = 'Stopping...';
+        
+        // Re-enable the start monitoring button
+        this.sendDiceBtn.disabled = false;
+        this.sendDiceBtn.textContent = '👁️ Start Monitoring Dice';
+    }
+    
+    updateUIMode() {
+        const diceGrid = document.querySelector('.dice-grid');
+        const excludeSection = document.getElementById('exclude-section');
+        const randomBtn = this.randomDiceBtn;
+        const sendBtnText = this.sendDiceBtn.textContent;
+        
+        // Hide the stop monitoring button when changing modes
+        this.stopMonitoringBtn.style.display = 'none';
+
+        // Update mode option visual states
+        this.modeOptions.forEach(option => {
+            const radio = option.querySelector('input[type="radio"]');
+            if (radio.checked) {
+                option.classList.add('selected');
+            } else {
+                option.classList.remove('selected');
+            }
+        });
+
+        if (this.currentMode === 'X') {
+            diceGrid.style.display = 'grid';
+            excludeSection.style.display = 'none';
+            document.getElementById('flick-section').style.display = 'none';
+            randomBtn.style.display = 'inline-block';
+            this.sendDiceBtn.textContent = '🎲 Send Dice to Group';
+        } else if (this.currentMode === 'Y' || this.currentMode === 'O') {
+            diceGrid.style.display = 'none';
+            excludeSection.style.display = 'block';
+            document.getElementById('flick-section').style.display = 'none';
+            randomBtn.style.display = 'none';
+            this.sendDiceBtn.textContent = '🎲 Send Dice to Group';
+        } else if (this.currentMode === 'Z') {
+            diceGrid.style.display = 'none';
+            excludeSection.style.display = 'block';
+            document.getElementById('flick-section').style.display = 'block';
+            randomBtn.style.display = 'none';
+            this.sendDiceBtn.textContent = '🎲 Send Dice to Group';
+        } else if (this.currentMode === 'M') {
+            // M Mode - only show exclude section since we're monitoring user dice
+            diceGrid.style.display = 'none';
+            excludeSection.style.display = 'block';
+            document.getElementById('flick-section').style.display = 'none';
+            randomBtn.style.display = 'none';
+            this.sendDiceBtn.textContent = '👁️ Start Monitoring Dice';
+        }
+    }
+
+    updateDicePreview() {
+        if (this.currentMode === 'Y' || this.currentMode === 'Z' || this.currentMode === 'O' || this.currentMode === 'M') {
+            const checkedBoxes = Array.from(document.querySelectorAll('#exclude-section input[type="checkbox"]:checked'));
+            const nums = checkedBoxes.map(cb => cb.value).join(',');
+            
+            if (this.currentMode === 'M') {
+                this.diceDisplay.textContent = nums ? `👁️🚫 ${nums}` : '👁️ Monitoring...';
+            } else {
+                this.diceDisplay.textContent = nums ? `🚫 ${nums}` : '🚫 –';
+            }
+            return;
+        }
+
+        const diceMap = {
+            '1': '⚀', '2': '⚁', '3': '⚂',
+            '4': '⚃', '5': '⚄', '6': '⚅',
+            'R': '🎲' // Random indicator
+        };
+        
+        const preview = this.diceSelects
+            .map(select => diceMap[select.value] || '🎲')
+            .join('');
+        
+        this.diceDisplay.textContent = preview;
+    }
+    
+    showCodeInput() {
+        document.getElementById('code-input').style.display = 'block';
+        this.codeInput.focus();
+    }
+    
+    hideCodeInput() {
+        document.getElementById('code-input').style.display = 'none';
+    }
+    
+    showDiceSection() {
+        document.getElementById('auth-section').style.display = 'none';
+        this.diceSection.style.display = 'block';
+    }
+    
+    resetAuthForm() {
+        this.connectBtn.disabled = false;
+        this.connectBtn.textContent = 'Connect to Telegram';
+        this.verifyCodeBtn.disabled = false;
+        this.verifyCodeBtn.textContent = 'Verify Code';
+        this.phoneInput.disabled = false;
+        this.groupIdInput.disabled = false;
+        this.hideCodeInput();
+    }
+    
+    resetSendButton() {
+        setTimeout(() => {
+            this.sendDiceBtn.disabled = false;
+            this.sendDiceBtn.textContent = '🎲 Send Dice to Group';
+        }, 2000);
+    }
+
+    // Persist credentials in browser storage for seamless refresh
+    saveSession() {
+        if (this.currentPhone && this.currentGroupId) {
+            localStorage.setItem('tg_phone', this.currentPhone);
+            localStorage.setItem('tg_group_id', this.currentGroupId);
+        }
+    }
+
+    // Restore credentials from storage and query server for auth status
+    restoreSession() {
+        const savedPhone = localStorage.getItem('tg_phone');
+        const savedGroup = localStorage.getItem('tg_group_id');
+        if (savedPhone) {
+            this.phoneInput.value = savedPhone;
+            this.currentPhone = savedPhone;
+        }
+        if (savedGroup) {
+            this.groupIdInput.value = savedGroup;
+            this.currentGroupId = savedGroup;
+        }
+        if (savedPhone && savedGroup) {
+            if (this.socket.connected) {
+                this.socket.emit('check_auth_status');
+            } else {
+                this.socket.once('connect', () => this.socket.emit('check_auth_status'));
+            }
+        }
+    }
+
+    // User-triggered credentials change
+    updateGroupId() {
+        const newId = this.newGroupIdInput.value.trim();
+        if (!newId) {
+            this.showMessage('Please enter a group ID', 'error');
+            return;
+        }
+        this.currentGroupId = newId;
+        localStorage.setItem('tg_group_id', newId);
+        if (this.isAuthenticated) {
+            this.socket.emit('set_group_id', { group_id: newId });
+            this.getGroupInfo();
+        } else {
+            this.showMessage('Group ID updated locally. Please authenticate.', 'info');
+        }
+    }
+
+    changeCredentials() {
+        localStorage.removeItem('tg_phone');
+        localStorage.removeItem('tg_group_id');
+        this.disconnect();
+        this.resetToInitialState();
+    }
+    
+    resetToInitialState() {
+        this.isAuthenticated = false;
+        this.phoneCodeHash = null;
+        this.currentPhone = null;
+        this.currentGroupId = null;
+
+        // Clear persisted credentials
+        localStorage.removeItem('tg_phone');
+        localStorage.removeItem('tg_group_id');
+        
+        document.getElementById('auth-section').style.display = 'block';
+        this.diceSection.style.display = 'none';
+        
+        this.phoneInput.value = '';
+        this.groupIdInput.value = '';
+        this.codeInput.value = '';
+        this.groupDetails.innerHTML = '';
+        this.updateAuthStatus('Not connected', 'error');
+        this.updateSendStatus('', '');
+        
+        // Hide the stop monitoring button
+        this.stopMonitoringBtn.style.display = 'none';
+        this.stopMonitoringBtn.disabled = false;
+        this.stopMonitoringBtn.textContent = '⏹️ Stop Monitoring';
+        
+        this.resetAuthForm();
+    }
+    
+    updateAuthStatus(message, type) {
+        this.authStatus.innerHTML = message;
+        this.authStatus.className = `status ${type}`;
+    }
+    
+    updateSendStatus(message, type) {
+        this.sendStatus.innerHTML = message;
+        this.sendStatus.className = `status ${type}`;
+    }
+    
+    showMessage(message, type) {
+        const messageElement = document.createElement('div');
+        messageElement.className = `message ${type}`;
+        messageElement.innerHTML = message;
+        
+        this.messagesContainer.appendChild(messageElement);
+        
+        // Auto remove after 5 seconds
+        setTimeout(() => {
+            if (messageElement.parentNode) {
+                messageElement.parentNode.removeChild(messageElement);
+            }
+        }, 5000);
+    }
+}
+
+// Initialize app when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('DOM loaded, initializing app');
+    
+    // Check if Socket.IO is available
+    if (typeof io === 'undefined') {
+        console.error('Socket.IO not loaded, waiting for fallback...');
+        // Wait a bit for fallback to load
+        setTimeout(() => {
+            if (typeof io !== 'undefined') {
+                console.log('Socket.IO loaded via fallback, initializing app');
+                new TelegramDiceApp();
+            } else {
+                console.error('Socket.IO still not available after fallback attempt');
+                addBasicFunctionality();
+            }
+        }, 2000);
+        return;
+    }
+    
+    try {
+        new TelegramDiceApp();
+    } catch (error) {
+        console.error('Error initializing app:', error);
+        addBasicFunctionality();
+    }
+});
+
+function addBasicFunctionality() {
+    console.log('Adding basic functionality without Socket.IO');
+    const connectBtn = document.getElementById('connect-btn');
+    if (connectBtn) {
+        connectBtn.addEventListener('click', () => {
+            alert('Socket.IO failed to load. Please refresh the page or check your internet connection.');
+        });
+    }
+}
