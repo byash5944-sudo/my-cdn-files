@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram Dice Sender</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
+    <script>
+        // Fallback if CDN fails
+        if (typeof io === 'undefined') {
+            console.warn('Socket.IO CDN failed, loading from alternative source');
+            var script = document.createElement('script');
+            script.src = 'https://unpkg.com/socket.io-client@4.7.2/dist/socket.io.min.js';
+            script.onload = function() {
+                console.log('Socket.IO loaded from fallback CDN');
+                // Reinitialize app if needed
+                if (typeof TelegramDiceApp !== 'undefined') {
+                    new TelegramDiceApp();
+                }
+            };
+            script.onerror = function() {
+                console.error('All Socket.IO CDNs failed');
+                alert('Unable to load Socket.IO library. Please check your internet connection.');
+            };
+            document.head.appendChild(script);
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <a href="/change_password" class="btn btn-warning" style="float:right;margin-left:10px;">Change Password</a>
+            <a href="/logout" class="btn btn-danger" style="float:right;">Logout</a>
+            <h1>🎲 Telegram Dice Sender</h1>
+            <p>Send custom dice combinations to your Telegram group</p>
+        </header>
+
+        <main>
+            <!-- Authentication Section -->
+            <section id="auth-section" class="card">
+                <h2>Connect to Telegram</h2>
+                <div class="form-group">
+                    <label for="phone-input">Phone Number (with country code):</label>
+                    <input type="text" id="phone-input" placeholder="+1234567890" required>
+                    <small>Include country code (e.g., +1 for US, +91 for India)</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="group-id-input">Target Group ID:</label>
+                    <input type="text" id="group-id-input" placeholder="-1001234567890" required>
+                    <small>Group ID or username (e.g., -1001234567890 or @groupname)</small>
+                </div>
+                
+                <button id="connect-btn" class="btn btn-primary">Connect to Telegram</button>
+                
+                <div id="code-input" class="form-group" style="display: none;">
+                    <label for="code">Verification Code (from Telegram app):</label>
+                    <input type="text" id="code" placeholder="12345" maxlength="5" required>
+                    <button id="verify-code-btn" class="btn btn-primary">Verify Code</button>
+                </div>
+                
+                <div id="auth-status" class="status"></div>
+            </section>
+
+            <!-- Dice Configuration Section -->
+            <section id="dice-section" class="card" style="display: none;">
+                <h2>Configure Dice & Send to Group</h2>
+                
+                <!-- Group Info -->
+                <div id="group-info" class="group-info">
+                    <h3>Target Group Information</h3>
+                    <div id="group-details">Loading group info...</div>
+                    <button id="refresh-group-btn" class="btn btn-secondary">Refresh Group Info</button>
+                    <!-- Inline change group ID -->
+                    <div class="form-inline">
+                        <input type="text" id="new-group-id-input" placeholder="Enter new Group ID" class="form-control">
+                        <button id="update-group-btn" class="btn btn-secondary">Update Group ID</button>
+                    </div>
+                </div>
+                
+                <!-- Mode Toggle -->
+                <div class="form-group mode-toggle">
+                    <div class="mode-option" data-mode="X">
+                        <input type="radio" name="mode" value="X" checked>
+                        <div>
+                            <span class="mode-icon">🎯</span>
+                            <span>X Mode (Select Desired Values)</span>
+                            <div class="mode-description">Choose specific values for each dice (1-6 or Random)</div>
+                        </div>
+                    </div>
+                    <div class="mode-option" data-mode="O">
+                        <input type="radio" name="mode" value="O">
+                        <div>
+                            <span class="mode-icon">🧠</span>
+                            <span>O Mode (Optimal)</span>
+                            <div class="mode-description">Exclude duplicates with adaptive optimisation</div>
+                        </div>
+                    </div>
+                    <div class="mode-option" data-mode="Y">
+                        <input type="radio" name="mode" value="Y">
+                        <div>
+                            <span class="mode-icon">🚫</span>
+                            <span>Y Mode (Exclude Values)</span>
+                            <div class="mode-description">Select numbers that should NOT appear in the dice roll</div>
+                        </div>
+                    </div>
+                    <div class="mode-option" data-mode="Z">
+                        <input type="radio" name="mode" value="Z">
+                        <div>
+                            <span class="mode-icon">♻️</span>
+                            <span>Z Mode (Exclude + flick Limit)</span>
+                            <div class="mode-description">Exclude duplicates with limited flick attempts</div>
+                        </div>
+                    </div>
+                    <div class="mode-option" data-mode="M">
+                        <input type="radio" name="mode" value="M">
+                        <div>
+                            <span class="mode-icon">👁️</span>
+                            <span>M Mode (Monitor)</span>
+                            <div class="mode-description">Monitor user-sent dice and manage duplicates</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dice Configuration (X Mode) -->
+                <div class="dice-grid">
+                    <div class="dice-input">
+                        <label>Die 1:</label>
+                        <select id="dice1">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                    <div class="dice-input">
+                        <label>Die 2:</label>
+                        <select id="dice2">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                    <div class="dice-input">
+                        <label>Die 3:</label>
+                        <select id="dice3">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                    <div class="dice-input">
+                        <label>Die 4:</label>
+                        <select id="dice4">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                    <div class="dice-input">
+                        <label>Die 5:</label>
+                        <select id="dice5">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                    <div class="dice-input">
+                        <label>Die 6:</label>
+                        <select id="dice6">
+                            <option value="1" selected>⚀ (1)</option>
+                            <option value="2">⚁ (2)</option>
+                            <option value="3">⚂ (3)</option>
+                            <option value="4">⚃ (4)</option>
+                            <option value="5">⚄ (5)</option>
+                            <option value="6">⚅ (6)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Exclude Configuration (Y Mode) -->
+                <div id="exclude-section" class="exclude-section" style="display:none;">
+                    <h3>Select numbers to exclude (they should NOT appear)</h3>
+                    <div class="exclude-checkboxes">
+                        <label><input type="checkbox" value="1"> ⚀ (1)</label>
+                        <label><input type="checkbox" value="2"> ⚁ (2)</label>
+                        <label><input type="checkbox" value="3"> ⚂ (3)</label>
+                        <label><input type="checkbox" value="4"> ⚃ (4)</label>
+                        <label><input type="checkbox" value="5"> ⚄ (5)</label>
+                        <label><input type="checkbox" value="6"> ⚅ (6)</label>
+                    </div>
+                </div>
+
+                <!-- flick Limit Configuration (Z Mode) -->
+                <div id="flick-section" class="flick-section" style="display:none;">
+                    <h3>Set flick Limits </h3>
+                    <div class="form-group">
+                        <label for="flick-total">Total flick Limit:</label>
+                        <input type="number" id="flick-total" min="0" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="flick-per">flick Per Throw Limit:</label>
+                        <input type="number" id="flick-per" min="0" value="0">
+                    </div>
+                </div>
+                
+                <div class="dice-preview">
+                    <h3>Preview: <span id="dice-display">⚀⚀⚀⚀⚀⚀</span></h3>
+                </div>
+                
+                <div class="action-buttons">
+                    <button id="send-dice-btn" class="btn btn-success">🎲 Send Dice to Group</button>
+                    <button id="stop-monitoring-btn" class="btn btn-warning" style="display: none;">⏹️ Stop Monitoring</button>
+                    <button id="random-dice-btn" class="btn btn-warning">🎯 Random Dice</button>
+                    <button id="disconnect-btn" class="btn btn-danger">Disconnect</button>
+                    <button id="change-credentials-btn" class="btn btn-secondary">Change Mobile &amp; Group ID</button>
+                </div>
+                
+                <div id="send-status" class="status"></div>
+            </section>
+        </main>
+
+        <!-- Status Messages -->
+        <div id="messages" class="messages"></div>
+    </div>
+
+    <script src="/static/js/script.js"></script>
+</body>
+</html>
